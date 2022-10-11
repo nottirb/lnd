@@ -1,0 +1,5 @@
+project: lnd
+target: init
+# image: ghcr.io/nottirb/lnd:latest
+cmds:
+- cmd: /out/init
