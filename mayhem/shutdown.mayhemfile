@@ -1,5 +1,5 @@
 project: lnd
 target: shutdown
-image: ghcr.io/nottirb/lnd:latest
+# image: ghcr.io/nottirb/lnd:latest
 cmds:
 - cmd: /shutdown
