@@ -1,5 +1,5 @@
 project: lnd
-target: init
+target: shutdown
 image: ghcr.io/nottirb/lnd:latest
 cmds:
-- cmd: /init
+- cmd: /shutdown
