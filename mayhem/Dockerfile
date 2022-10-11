@@ -15,7 +15,7 @@
 ################################################################################
 
 # Pull the oss-fuzz base image
-FROM gcr.io/oss-fuzz-base/base-builder-go
+FROM gcr.io/oss-fuzz-base/base-builder-go as builder
 
 # Push the code into the container
 COPY . lnd
@@ -32,3 +32,7 @@ WORKDIR $SRC/lnd
 # Setup the environment & compile the program
 ENV FUZZING_LANGUAGE=go SANITIZER=address
 RUN compile
+
+# Move to clean ubuntu container
+FROM ubuntu:20.04
+COPY --from=builder /out /

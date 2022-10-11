@@ -18,3 +18,5 @@
 # This could use a lot more fuzzers. It's on my back-log.
 # This could also use a seed corpus.
 compile_go_fuzzer github.com/lightningnetwork/lnd/fuzz/lnwire Fuzz_init init gofuzz
+compile_go_fuzzer github.com/lightningnetwork/lnd/fuzz/lnwire Fuzz_open_channel open_channel gofuzz
+compile_go_fuzzer github.com/lightningnetwork/lnd/fuzz/lnwire Fuzz_shutdown shutdown gofuzz

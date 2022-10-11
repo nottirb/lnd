@@ -42,12 +42,28 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-    - name: Start analysis
+    - name: Start analysis for init
       uses: forallsecure/mcode-action@v1
       with:
         mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
-        args: --image ${{ steps.meta.outputs.tags }} --cmd /out/init
+        args: --image ${{ steps.meta.outputs.tags }} --cmd /init
           --target init --file mayhem/init.mayhemfile
+          --duration 650
+        sarif-output: sarif
+    - name: Start analysis for shutdown
+      uses: forallsecure/mcode-action@v1
+      with:
+        mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
+        args: --image ${{ steps.meta.outputs.tags }} --cmd /shutdown
+          --target shutdown --file mayhem/shutdown.mayhemfile
+          --duration 650
+        sarif-output: sarif
+    - name: Start analysis for open-channel
+      uses: forallsecure/mcode-action@v1
+      with:
+        mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
+        args: --image ${{ steps.meta.outputs.tags }} --cmd /open_channel
+          --target open-channel --file mayhem/open_channel.mayhemfile
           --duration 650
         sarif-output: sarif
     - name: Upload SARIF file(s)
