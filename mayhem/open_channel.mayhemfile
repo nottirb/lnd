@@ -1,5 +1,5 @@
 project: lnd
 target: open-channel
-image: ghcr.io/nottirb/lnd:latest
+# image: ghcr.io/nottirb/lnd:latest
 cmds:
 - cmd: /open_channel
