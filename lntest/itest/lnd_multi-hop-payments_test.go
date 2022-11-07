@@ -10,6 +10,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lntest"
+	"github.com/stretchr/testify/require"
 )
 
 func testMultiHopPayments(net *lntest.NetworkHarness, t *harnessTest) {
@@ -171,6 +172,7 @@ func testMultiHopPayments(net *lntest.NetworkHarness, t *harnessTest) {
 	if err != nil {
 		t.Fatalf("could not subscribe events: %v", err)
 	}
+	assertSubscribed(t, aliceEvents)
 
 	bobEvents, err := net.Bob.RouterClient.SubscribeHtlcEvents(
 		ctxt, &routerrpc.SubscribeHtlcEventsRequest{},
@@ -178,6 +180,7 @@ func testMultiHopPayments(net *lntest.NetworkHarness, t *harnessTest) {
 	if err != nil {
 		t.Fatalf("could not subscribe events: %v", err)
 	}
+	assertSubscribed(t, bobEvents)
 
 	carolEvents, err := carol.RouterClient.SubscribeHtlcEvents(
 		ctxt, &routerrpc.SubscribeHtlcEventsRequest{},
@@ -185,6 +188,7 @@ func testMultiHopPayments(net *lntest.NetworkHarness, t *harnessTest) {
 	if err != nil {
 		t.Fatalf("could not subscribe events: %v", err)
 	}
+	assertSubscribed(t, carolEvents)
 
 	daveEvents, err := dave.RouterClient.SubscribeHtlcEvents(
 		ctxt, &routerrpc.SubscribeHtlcEventsRequest{},
@@ -192,6 +196,7 @@ func testMultiHopPayments(net *lntest.NetworkHarness, t *harnessTest) {
 	if err != nil {
 		t.Fatalf("could not subscribe events: %v", err)
 	}
+	assertSubscribed(t, daveEvents)
 
 	// Using Carol as the source, pay to the 5 invoices from Bob created
 	// above.
@@ -253,44 +258,59 @@ func testMultiHopPayments(net *lntest.NetworkHarness, t *harnessTest) {
 	// each of the forwarded payments.
 	ctxt, _ = context.WithTimeout(ctxb, defaultTimeout)
 	feeReport, err := dave.FeeReport(ctxt, &lnrpc.FeeReportRequest{})
-	if err != nil {
-		t.Fatalf("unable to query for fee report: %v", err)
-	}
-
-	if feeReport.DayFeeSum != uint64(expectedFeeDave) {
-		t.Fatalf("fee mismatch: expected %v, got %v", expectedFeeDave,
-			feeReport.DayFeeSum)
-	}
-	if feeReport.WeekFeeSum != uint64(expectedFeeDave) {
-		t.Fatalf("fee mismatch: expected %v, got %v", expectedFeeDave,
-			feeReport.WeekFeeSum)
-	}
-	if feeReport.MonthFeeSum != uint64(expectedFeeDave) {
-		t.Fatalf("fee mismatch: expected %v, got %v", expectedFeeDave,
-			feeReport.MonthFeeSum)
-	}
+	require.NoError(t.t, err)
+	require.EqualValues(t.t, expectedFeeDave, feeReport.DayFeeSum)
+	require.EqualValues(t.t, expectedFeeDave, feeReport.WeekFeeSum)
+	require.EqualValues(t.t, expectedFeeDave, feeReport.MonthFeeSum)
 
 	// Next, ensure that if we issue the vanilla query for the forwarding
 	// history, it returns 5 values, and each entry is formatted properly.
+	// From David's perspective he receives a payement from Carol and
+	// forwards it to Alice. So let's ensure that the forwarding history
+	// returns Carol's peer alias as inbound and Alice's alias as outbound.
+	info, err := carol.GetInfo(ctxt, &lnrpc.GetInfoRequest{})
+	require.NoError(t.t, err)
+	carolAlias := info.Alias
+
+	info, err = net.Alice.GetInfo(ctxt, &lnrpc.GetInfoRequest{})
+	require.NoError(t.t, err)
+	aliceAlias := info.Alias
+
 	ctxt, _ = context.WithTimeout(ctxb, defaultTimeout)
 	fwdingHistory, err := dave.ForwardingHistory(
 		ctxt, &lnrpc.ForwardingHistoryRequest{},
 	)
-	if err != nil {
-		t.Fatalf("unable to query for fee report: %v", err)
-	}
-	if len(fwdingHistory.ForwardingEvents) != numPayments {
-		t.Fatalf("wrong number of forwarding event: expected %v, "+
-			"got %v", numPayments,
-			len(fwdingHistory.ForwardingEvents))
-	}
+	require.NoError(t.t, err)
+	require.Len(t.t, fwdingHistory.ForwardingEvents, numPayments)
 	expectedForwardingFee := uint64(expectedFeeDave / numPayments)
 	for _, event := range fwdingHistory.ForwardingEvents {
 		// Each event should show a fee of 170 satoshi.
-		if event.Fee != expectedForwardingFee {
-			t.Fatalf("fee mismatch:  expected %v, got %v",
-				expectedForwardingFee, event.Fee)
-		}
+		require.Equal(t.t, expectedForwardingFee, event.Fee)
+
+		// Check that peer aliases are empty since the
+		// ForwardingHistoryRequest did not specify the PeerAliasLookup
+		// flag.
+		require.Empty(t.t, event.PeerAliasIn)
+		require.Empty(t.t, event.PeerAliasOut)
+	}
+
+	// Lookup the forwarding history again but this time also lookup the
+	// peers' alias names.
+	fwdingHistory, err = dave.ForwardingHistory(
+		ctxt, &lnrpc.ForwardingHistoryRequest{
+			PeerAliasLookup: true,
+		},
+	)
+	require.NoError(t.t, err)
+	require.Len(t.t, fwdingHistory.ForwardingEvents, numPayments)
+	for _, event := range fwdingHistory.ForwardingEvents {
+		// Each event should show a fee of 170 satoshi.
+		require.Equal(t.t, expectedForwardingFee, event.Fee)
+
+		// Check that peer aliases adhere to payment flow, namely
+		// Carol->Dave->Alice.
+		require.Equal(t.t, carolAlias, event.PeerAliasIn)
+		require.Equal(t.t, aliceAlias, event.PeerAliasOut)
 	}
 
 	// We expect Carol to have successful forwards and settles for
@@ -328,13 +348,26 @@ func assertHtlcEvents(t *harnessTest, fwdCount, fwdFailCount, settleCount int,
 	userType routerrpc.HtlcEvent_EventType,
 	client routerrpc.Router_SubscribeHtlcEventsClient) {
 
-	var forwards, forwardFails, settles int
+	var forwards, forwardFails, settles, finalSettles, finalFails int
 
-	numEvents := fwdCount + fwdFailCount + settleCount
+	var finalFailCount, finalSettleCount int
+	if userType != routerrpc.HtlcEvent_SEND {
+		finalFailCount = fwdFailCount
+		finalSettleCount = settleCount
+	}
+
+	numEvents := fwdCount + fwdFailCount + settleCount +
+		finalFailCount + finalSettleCount
+
 	for i := 0; i < numEvents; i++ {
-		event := assertEventAndType(t, userType, client)
+		event, err := client.Recv()
+		if err != nil {
+			t.Fatalf("could not get event")
+		}
 
-		switch event.Event.(type) {
+		expectedEventType := userType
+
+		switch e := event.Event.(type) {
 		case *routerrpc.HtlcEvent_ForwardEvent:
 			forwards++
 
@@ -344,8 +377,22 @@ func assertHtlcEvents(t *harnessTest, fwdCount, fwdFailCount, settleCount int,
 		case *routerrpc.HtlcEvent_SettleEvent:
 			settles++
 
+		case *routerrpc.HtlcEvent_FinalHtlcEvent:
+			if e.FinalHtlcEvent.Settled {
+				finalSettles++
+			} else {
+				finalFails++
+			}
+
+			expectedEventType = routerrpc.HtlcEvent_UNKNOWN
+
 		default:
 			t.Fatalf("unexpected event: %T", event.Event)
+		}
+
+		if event.EventType != expectedEventType {
+			t.Fatalf("expected: %v, got: %v", expectedEventType,
+				event.EventType)
 		}
 	}
 
@@ -358,8 +405,18 @@ func assertHtlcEvents(t *harnessTest, fwdCount, fwdFailCount, settleCount int,
 			forwardFails)
 	}
 
+	if finalFails != finalFailCount {
+		t.Fatalf("expected: %v final fails, got: %v", finalFailCount,
+			finalFails)
+	}
+
 	if settles != settleCount {
 		t.Fatalf("expected: %v settles, got: %v", settleCount, settles)
+	}
+
+	if finalSettles != finalSettleCount {
+		t.Fatalf("expected: %v settles, got: %v", finalSettleCount,
+			finalSettles)
 	}
 }
 
@@ -381,6 +438,14 @@ func assertEventAndType(t *harnessTest, eventType routerrpc.HtlcEvent_EventType,
 	}
 
 	return event
+}
+
+func assertSubscribed(t *harnessTest,
+	client routerrpc.Router_SubscribeHtlcEventsClient) {
+
+	event, err := client.Recv()
+	require.NoError(t.t, err)
+	require.NotNil(t.t, event.GetSubscribedEvent())
 }
 
 // updateChannelPolicy updates the channel policy of node to the

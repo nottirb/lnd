@@ -1297,6 +1297,11 @@ var forwardingHistoryCommand = cli.Command{
 			Name:  "max_events",
 			Usage: "the max number of events to return",
 		},
+		cli.BoolFlag{
+			Name: "skip_peer_alias_lookup",
+			Usage: "skip the peer alias lookup per forwarding " +
+				"event in order to improve performance",
+		},
 	},
 	Action: actionDecorator(forwardingHistory),
 }
@@ -1347,7 +1352,8 @@ func forwardingHistory(ctx *cli.Context) error {
 	case args.Present():
 		i, err := strconv.ParseInt(args.First(), 10, 64)
 		if err != nil {
-			return fmt.Errorf("unable to decode index_offset: %v", err)
+			return fmt.Errorf("unable to decode index_offset: %v",
+				err)
 		}
 		indexOffset = uint32(i)
 		args = args.Tail()
@@ -1359,16 +1365,22 @@ func forwardingHistory(ctx *cli.Context) error {
 	case args.Present():
 		m, err := strconv.ParseInt(args.First(), 10, 64)
 		if err != nil {
-			return fmt.Errorf("unable to decode max_events: %v", err)
+			return fmt.Errorf("unable to decode max_events: %v",
+				err)
 		}
 		maxEvents = uint32(m)
 	}
 
+	// By default we will look up the peers' alias information unless the
+	// skip_peer_alias_lookup flag is specified.
+	lookupPeerAlias := !ctx.Bool("skip_peer_alias_lookup")
+
 	req := &lnrpc.ForwardingHistoryRequest{
-		StartTime:    startTime,
-		EndTime:      endTime,
-		IndexOffset:  indexOffset,
-		NumMaxEvents: maxEvents,
+		StartTime:       startTime,
+		EndTime:         endTime,
+		IndexOffset:     indexOffset,
+		NumMaxEvents:    maxEvents,
+		PeerAliasLookup: lookupPeerAlias,
 	}
 	resp, err := client.ForwardingHistory(ctxc, req)
 	if err != nil {

@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
+	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/wire"
@@ -39,6 +39,16 @@ var (
 	// ErrDryRunMigrationOK signals that a migration executed successful,
 	// but we intentionally did not commit the result.
 	ErrDryRunMigrationOK = errors.New("dry run migration successful")
+
+	// ErrFinalHtlcsBucketNotFound signals that the top-level final htlcs
+	// bucket does not exist.
+	ErrFinalHtlcsBucketNotFound = errors.New("final htlcs bucket not " +
+		"found")
+
+	// ErrFinalChannelBucketNotFound signals that the channel bucket for
+	// final htlc outcomes does not exist.
+	ErrFinalChannelBucketNotFound = errors.New("final htlcs channel " +
+		"bucket not found")
 )
 
 // migration is a function which takes a prior outdated version of the database
@@ -436,9 +446,14 @@ func (d *DB) Wipe() error {
 // the database are created.
 func initChannelDB(db kvdb.Backend) error {
 	err := kvdb.Update(db, func(tx kvdb.RwTx) error {
+		// Check if DB was marked as inactive with a tomb stone.
+		if err := EnsureNoTombstone(tx); err != nil {
+			return err
+		}
+
 		meta := &Meta{}
 		// Check if DB is already initialized.
-		err := fetchMeta(meta, tx)
+		err := FetchMeta(meta, tx)
 		if err == nil {
 			return nil
 		}
@@ -1417,7 +1432,7 @@ func (c *ChannelStateDB) DeleteChannelOpeningState(outPoint []byte) error {
 // applies migration functions to the current database and recovers the
 // previous state of db if at least one error/panic appeared during migration.
 func (d *DB) syncVersions(versions []mandatoryVersion) error {
-	meta, err := d.FetchMeta(nil)
+	meta, err := d.FetchMeta()
 	if err != nil {
 		if err == ErrMetaNotFound {
 			meta = &Meta{}
@@ -1561,6 +1576,12 @@ func (d *DB) ChannelStateDB() *ChannelStateDB {
 	return d.channelStateDB
 }
 
+// LatestDBVersion returns the number of the latest database version currently
+// known to the channel DB.
+func LatestDBVersion() uint32 {
+	return getLatestDBVersion(dbVersions)
+}
+
 func getLatestDBVersion(versions []mandatoryVersion) uint32 {
 	return versions[len(versions)-1].number
 }
@@ -1641,36 +1662,126 @@ func (c *ChannelStateDB) FetchHistoricalChannel(outPoint *wire.OutPoint) (
 	return channel, nil
 }
 
+func fetchFinalHtlcsBucket(tx kvdb.RTx,
+	chanID lnwire.ShortChannelID) (kvdb.RBucket, error) {
+
+	finalHtlcsBucket := tx.ReadBucket(finalHtlcsBucket)
+	if finalHtlcsBucket == nil {
+		return nil, ErrFinalHtlcsBucketNotFound
+	}
+
+	var chanIDBytes [8]byte
+	byteOrder.PutUint64(chanIDBytes[:], chanID.ToUint64())
+
+	chanBucket := finalHtlcsBucket.NestedReadBucket(chanIDBytes[:])
+	if chanBucket == nil {
+		return nil, ErrFinalChannelBucketNotFound
+	}
+
+	return chanBucket, nil
+}
+
+var ErrHtlcUnknown = errors.New("htlc unknown")
+
+// LookupFinalHtlc retrieves a final htlc resolution from the database. If the
+// htlc has no final resolution yet, ErrHtlcUnknown is returned.
+func (c *ChannelStateDB) LookupFinalHtlc(chanID lnwire.ShortChannelID,
+	htlcIndex uint64) (*FinalHtlcInfo, error) {
+
+	var idBytes [8]byte
+	byteOrder.PutUint64(idBytes[:], htlcIndex)
+
+	var settledByte byte
+
+	err := kvdb.View(c.backend, func(tx kvdb.RTx) error {
+		finalHtlcsBucket, err := fetchFinalHtlcsBucket(
+			tx, chanID,
+		)
+		switch {
+		case errors.Is(err, ErrFinalHtlcsBucketNotFound):
+			fallthrough
+
+		case errors.Is(err, ErrFinalChannelBucketNotFound):
+			return ErrHtlcUnknown
+
+		case err != nil:
+			return fmt.Errorf("cannot fetch final htlcs bucket: %w",
+				err)
+		}
+
+		value := finalHtlcsBucket.Get(idBytes[:])
+		if value == nil {
+			return ErrHtlcUnknown
+		}
+
+		if len(value) != 1 {
+			return errors.New("unexpected final htlc value length")
+		}
+
+		settledByte = value[0]
+
+		return nil
+	}, func() {
+		settledByte = 0
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	info := FinalHtlcInfo{
+		Settled:  settledByte&byte(FinalHtlcSettledBit) != 0,
+		Offchain: settledByte&byte(FinalHtlcOffchainBit) != 0,
+	}
+
+	return &info, nil
+}
+
+// PutOnchainFinalHtlcOutcome stores the final on-chain outcome of an htlc in
+// the database.
+func (c *ChannelStateDB) PutOnchainFinalHtlcOutcome(
+	chanID lnwire.ShortChannelID, htlcID uint64, settled bool) error {
+
+	return kvdb.Update(c.backend, func(tx kvdb.RwTx) error {
+		finalHtlcsBucket, err := fetchFinalHtlcsBucketRw(tx, chanID)
+		if err != nil {
+			return err
+		}
+
+		return putFinalHtlc(
+			finalHtlcsBucket, htlcID,
+			FinalHtlcInfo{
+				Settled:  settled,
+				Offchain: false,
+			},
+		)
+	}, func() {})
+}
+
 // MakeTestDB creates a new instance of the ChannelDB for testing purposes.
 // A callback which cleans up the created temporary directories is also
 // returned and intended to be executed after the test completes.
-func MakeTestDB(modifiers ...OptionModifier) (*DB, func(), error) {
+func MakeTestDB(t *testing.T, modifiers ...OptionModifier) (*DB, error) {
 	// First, create a temporary directory to be used for the duration of
 	// this test.
-	tempDirName, err := ioutil.TempDir("", "channeldb")
-	if err != nil {
-		return nil, nil, err
-	}
+	tempDirName := t.TempDir()
 
 	// Next, create channeldb for the first time.
 	backend, backendCleanup, err := kvdb.GetTestBackend(tempDirName, "cdb")
 	if err != nil {
 		backendCleanup()
-		return nil, nil, err
+		return nil, err
 	}
 
 	cdb, err := CreateWithBackend(backend, modifiers...)
 	if err != nil {
 		backendCleanup()
-		os.RemoveAll(tempDirName)
-		return nil, nil, err
+		return nil, err
 	}
 
-	cleanUp := func() {
+	t.Cleanup(func() {
 		cdb.Close()
 		backendCleanup()
-		os.RemoveAll(tempDirName)
-	}
+	})
 
-	return cdb, cleanUp, nil
+	return cdb, nil
 }

@@ -346,9 +346,8 @@ func createTestChannelState(t *testing.T, cdb *ChannelStateDB) *OpenChannel {
 func TestOpenChannelPutGetDelete(t *testing.T) {
 	t.Parallel()
 
-	fullDB, cleanUp, err := MakeTestDB()
+	fullDB, err := MakeTestDB(t)
 	require.NoError(t, err, "unable to make test database")
-	defer cleanUp()
 
 	cdb := fullDB.ChannelStateDB()
 
@@ -487,11 +486,10 @@ func TestOptionalShutdown(t *testing.T) {
 		test := test
 
 		t.Run(test.name, func(t *testing.T) {
-			fullDB, cleanUp, err := MakeTestDB()
+			fullDB, err := MakeTestDB(t)
 			if err != nil {
 				t.Fatalf("unable to make test database: %v", err)
 			}
-			defer cleanUp()
 
 			cdb := fullDB.ChannelStateDB()
 
@@ -572,9 +570,8 @@ func assertRevocationLogEntryEqual(t *testing.T, c *ChannelCommitment,
 func TestChannelStateTransition(t *testing.T) {
 	t.Parallel()
 
-	fullDB, cleanUp, err := MakeTestDB()
+	fullDB, err := MakeTestDB(t)
 	require.NoError(t, err, "unable to make test database")
-	defer cleanUp()
 
 	cdb := fullDB.ChannelStateDB()
 
@@ -644,7 +641,7 @@ func TestChannelStateTransition(t *testing.T) {
 		},
 	}
 
-	err = channel.UpdateCommitment(&commitment, unsignedAckedUpdates)
+	_, err = channel.UpdateCommitment(&commitment, unsignedAckedUpdates)
 	require.NoError(t, err, "unable to update commitment")
 
 	// Assert that update is correctly written to the database.
@@ -889,9 +886,8 @@ func TestChannelStateTransition(t *testing.T) {
 func TestFetchPendingChannels(t *testing.T) {
 	t.Parallel()
 
-	fullDB, cleanUp, err := MakeTestDB()
+	fullDB, err := MakeTestDB(t)
 	require.NoError(t, err, "unable to make test database")
-	defer cleanUp()
 
 	cdb := fullDB.ChannelStateDB()
 
@@ -960,9 +956,8 @@ func TestFetchPendingChannels(t *testing.T) {
 func TestFetchClosedChannels(t *testing.T) {
 	t.Parallel()
 
-	fullDB, cleanUp, err := MakeTestDB()
+	fullDB, err := MakeTestDB(t)
 	require.NoError(t, err, "unable to make test database")
-	defer cleanUp()
 
 	cdb := fullDB.ChannelStateDB()
 
@@ -1041,9 +1036,8 @@ func TestFetchWaitingCloseChannels(t *testing.T) {
 	// We'll start by creating two channels within our test database. One of
 	// them will have their funding transaction confirmed on-chain, while
 	// the other one will remain unconfirmed.
-	fullDB, cleanUp, err := MakeTestDB()
+	fullDB, err := MakeTestDB(t)
 	require.NoError(t, err, "unable to make test database")
-	defer cleanUp()
 
 	cdb := fullDB.ChannelStateDB()
 
@@ -1154,9 +1148,8 @@ func TestFetchWaitingCloseChannels(t *testing.T) {
 func TestRefresh(t *testing.T) {
 	t.Parallel()
 
-	fullDB, cleanUp, err := MakeTestDB()
+	fullDB, err := MakeTestDB(t)
 	require.NoError(t, err, "unable to make test database")
-	defer cleanUp()
 
 	cdb := fullDB.ChannelStateDB()
 
@@ -1298,12 +1291,11 @@ func TestCloseInitiator(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			fullDB, cleanUp, err := MakeTestDB()
+			fullDB, err := MakeTestDB(t)
 			if err != nil {
 				t.Fatalf("unable to make test database: %v",
 					err)
 			}
-			defer cleanUp()
 
 			cdb := fullDB.ChannelStateDB()
 
@@ -1345,12 +1337,11 @@ func TestCloseInitiator(t *testing.T) {
 // TestCloseChannelStatus tests setting of a channel status on the historical
 // channel on channel close.
 func TestCloseChannelStatus(t *testing.T) {
-	fullDB, cleanUp, err := MakeTestDB()
+	fullDB, err := MakeTestDB(t)
 	if err != nil {
 		t.Fatalf("unable to make test database: %v",
 			err)
 	}
-	defer cleanUp()
 
 	cdb := fullDB.ChannelStateDB()
 
@@ -1465,4 +1456,62 @@ func TestKeyLocatorEncoding(t *testing.T) {
 	// Finally, we'll compare that the original KeyLocator and the decoded
 	// version are equal.
 	require.Equal(t, keyLoc, decodedKeyLoc)
+}
+
+// TestFinalHtlcs tests final htlc storage and retrieval.
+func TestFinalHtlcs(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err, "unable to make test database")
+
+	cdb := fullDB.ChannelStateDB()
+
+	chanID := lnwire.ShortChannelID{
+		BlockHeight: 1,
+		TxIndex:     2,
+		TxPosition:  3,
+	}
+
+	// Test unknown htlc lookup.
+	const unknownHtlcID = 999
+
+	_, err = cdb.LookupFinalHtlc(chanID, unknownHtlcID)
+	require.ErrorIs(t, err, ErrHtlcUnknown)
+
+	// Test offchain final htlcs.
+	const offchainHtlcID = 1
+
+	err = kvdb.Update(cdb.backend, func(tx kvdb.RwTx) error {
+		bucket, err := fetchFinalHtlcsBucketRw(
+			tx, chanID,
+		)
+		require.NoError(t, err)
+
+		return putFinalHtlc(bucket, offchainHtlcID, FinalHtlcInfo{
+			Settled:  true,
+			Offchain: true,
+		})
+	}, func() {})
+	require.NoError(t, err)
+
+	info, err := cdb.LookupFinalHtlc(chanID, offchainHtlcID)
+	require.NoError(t, err)
+	require.True(t, info.Settled)
+	require.True(t, info.Offchain)
+
+	// Test onchain final htlcs.
+	const onchainHtlcID = 2
+
+	err = cdb.PutOnchainFinalHtlcOutcome(chanID, onchainHtlcID, true)
+	require.NoError(t, err)
+
+	info, err = cdb.LookupFinalHtlc(chanID, onchainHtlcID)
+	require.NoError(t, err)
+	require.True(t, info.Settled)
+	require.False(t, info.Offchain)
+
+	// Test unknown htlc lookup for existing channel.
+	_, err = cdb.LookupFinalHtlc(chanID, unknownHtlcID)
+	require.ErrorIs(t, err, ErrHtlcUnknown)
 }

@@ -666,10 +666,18 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	if err != nil {
 		return nil, err
 	}
-	s.interceptableSwitch = htlcswitch.NewInterceptableSwitch(
-		s.htlcSwitch, lncfg.DefaultFinalCltvRejectDelta,
-		s.cfg.RequireInterceptor,
+	s.interceptableSwitch, err = htlcswitch.NewInterceptableSwitch(
+		&htlcswitch.InterceptableSwitchConfig{
+			Switch:             s.htlcSwitch,
+			CltvRejectDelta:    lncfg.DefaultFinalCltvRejectDelta,
+			CltvInterceptDelta: lncfg.DefaultCltvInterceptDelta,
+			RequireInterceptor: s.cfg.RequireInterceptor,
+			Notifier:           s.cc.ChainNotifier,
+		},
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	s.witnessBeacon = newPreimageBeacon(
 		dbs.ChanStateDB.NewWitnessCache(),
@@ -1157,6 +1165,8 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		IsForwardedHTLC:               s.htlcSwitch.IsForwardedHTLC,
 		Clock:                         clock.NewDefaultClock(),
 		SubscribeBreachComplete:       s.breachArbiter.SubscribeBreachComplete,
+		PutFinalHtlcOutcome:           s.chanStateDB.PutOnchainFinalHtlcOutcome, // nolint: lll
+		HtlcNotifier:                  s.htlcNotifier,
 	}, dbs.ChanStateDB)
 
 	// Select the configuration and furnding parameters for Bitcoin or
